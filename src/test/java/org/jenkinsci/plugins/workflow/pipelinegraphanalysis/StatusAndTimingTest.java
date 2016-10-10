@@ -24,16 +24,12 @@
 
 package org.jenkinsci.plugins.workflow.pipelinegraphanalysis;
 
-import com.cloudbees.workflow.flownode.FlowNodeUtil;
-import hudson.model.Action;
 import hudson.model.Result;
 import hudson.model.queue.QueueTaskFuture;
-import org.apache.commons.lang.StringUtils;
 import org.jenkinsci.plugins.workflow.actions.TimingAction;
 import org.jenkinsci.plugins.workflow.cps.CpsFlowDefinition;
 import org.jenkinsci.plugins.workflow.cps.CpsFlowExecution;
 import org.jenkinsci.plugins.workflow.flow.FlowExecution;
-import org.jenkinsci.plugins.workflow.graph.BlockEndNode;
 import org.jenkinsci.plugins.workflow.graph.BlockStartNode;
 import org.jenkinsci.plugins.workflow.graph.FlowNode;
 import org.jenkinsci.plugins.workflow.job.WorkflowJob;
@@ -58,7 +54,7 @@ public class StatusAndTimingTest {
     public JenkinsRule j = new JenkinsRule();
 
     // Helper
-    FlowNode[] getNodes(FlowExecution exec, int[] ids) throws IOException {
+    static FlowNode[] getNodes(FlowExecution exec, int[] ids) throws IOException {
         FlowNode[] output = new FlowNode[ids.length];
         for (int i=0; i < ids.length; i++) {
             output[i] = exec.getNode(Integer.toString(ids[i]));
@@ -67,7 +63,7 @@ public class StatusAndTimingTest {
     }
 
     // Helper
-    public long doTiming(FlowExecution exec, int firstNodeId, int nodeAfterEndId) throws  IOException {
+    static public long doTiming(FlowExecution exec, int firstNodeId, int nodeAfterEndId) throws  IOException {
         long startTime = TimingAction.getStartTime(exec.getNode(Integer.toString(firstNodeId)));
         long endTime = TimingAction.getStartTime(exec.getNode(Integer.toString(nodeAfterEndId)));
         return endTime-startTime;
@@ -105,21 +101,22 @@ public class StatusAndTimingTest {
         // Test status handling with the first few nodes
         FlowNode[] n = getNodes(run.getExecution(), new int[]{2, 3, 4, 5, 6, 7});
         GenericStatus status = StatusAndTiming.computeChunkStatus(run, null, n[0], n[1], n[2]);
-        TimingInfo timing = StatusAndTiming.computeChunkTiming(run, 0, null, n[0], n[1], n[2]);
+        TimingInfo timing = StatusAndTiming.computeChunkTiming(run, 0, n[0], n[1], n[2]);
         Assert.assertEquals(GenericStatus.SUCCESS, status);
         Assert.assertEquals(0, timing.getPauseDurationMillis());
+        Assert.assertEquals(run.getStartTimeInMillis(), timing.getStartTimeMillis());
         Assert.assertEquals(TimingAction.getStartTime(n[2]) - run.getStartTimeInMillis(), timing.getTotalDurationMillis());
 
         // Everything but start/end
         status = StatusAndTiming.computeChunkStatus(run, n[0], n[1], n[4], n[5]);
-        timing = StatusAndTiming.computeChunkTiming(run, 2, n[0], n[1], n[4], n[5]);
+        timing = StatusAndTiming.computeChunkTiming(run, 2, n[1], n[4], n[5]);
         Assert.assertEquals(GenericStatus.SUCCESS, status);
         Assert.assertEquals(timing.getPauseDurationMillis(), 2);
         Assert.assertEquals(TimingAction.getStartTime(n[5]) - TimingAction.getStartTime(n[1]), timing.getTotalDurationMillis());
 
         // Whole flow
         status = StatusAndTiming.computeChunkStatus(run, null, n[0], n[5], null);
-        timing = StatusAndTiming.computeChunkTiming(run, 0, null, n[0], n[5], null);
+        timing = StatusAndTiming.computeChunkTiming(run, 0, n[0], n[5], null);
         Assert.assertEquals(GenericStatus.SUCCESS, status);
         Assert.assertEquals(0, timing.getPauseDurationMillis());
         Assert.assertEquals(run.getDuration(), timing.getTotalDurationMillis());
@@ -280,12 +277,14 @@ public class StatusAndTimingTest {
         Assert.assertEquals(50L, successTiming.getPauseDurationMillis());
         long successRunTime = doTiming(exec, 6, 13);
         Assert.assertEquals(successRunTime, successTiming.getTotalDurationMillis());
+        Assert.assertEquals(TimingAction.getStartTime(exec.getNode("6")), successTiming.getStartTimeMillis());
 
         // Failing branch time, 50 ms pause was a present above
         TimingInfo failTiming = branchTimings.get("fail");
         long failRunTime = doTiming(exec, 7, 13);
         Assert.assertEquals(Math.min(5L, failRunTime), failTiming.getPauseDurationMillis());
         Assert.assertEquals(failRunTime, failTiming.getTotalDurationMillis());
+        Assert.assertEquals(TimingAction.getStartTime(exec.getNode("7")), failTiming.getStartTimeMillis());
 
         // Check timing computation for overall result
         TimingInfo finalTiming = StatusAndTiming.computeOverallParallelTiming(
@@ -311,7 +310,7 @@ public class StatusAndTimingTest {
                 run, null, exec.getNode("2"), exec.getNode("6"), null));
         long currTime = System.currentTimeMillis();
         TimingInfo tim = StatusAndTiming.computeChunkTiming(
-                run, 0, null, exec.getNode("2"), exec.getNode("6"), null);
+                run, 0, exec.getNode("2"), exec.getNode("6"), null);
         Assert.assertEquals((double)(currTime-run.getStartTimeInMillis()), (double)(tim.getTotalDurationMillis()), 20.0);
         SemaphoreStep.success("wait/1", null);
     }
@@ -416,7 +415,7 @@ public class StatusAndTimingTest {
         GenericStatus status = StatusAndTiming.computeChunkStatus(run, null, e.getNode("2"), e.getNode("5"), null);
         Assert.assertEquals(GenericStatus.PAUSED_PENDING_INPUT, status);
         long currentTime = System.currentTimeMillis();
-        TimingInfo timing = StatusAndTiming.computeChunkTiming(run, 0L, null, e.getNode("2"), e.getNode("5"), null);
+        TimingInfo timing = StatusAndTiming.computeChunkTiming(run, 0L, e.getNode("2"), e.getNode("5"), null);
         long runTime = currentTime - run.getStartTimeInMillis();
         Assert.assertEquals((double) (runTime), (double) (timing.getTotalDurationMillis()), 10.0); // Approx b/c depends on when currentTime gathered
 
@@ -426,42 +425,5 @@ public class StatusAndTimingTest {
         FlowExecution exec = run.getExecution();
         status = StatusAndTiming.computeChunkStatus(run, null, exec.getNode("2"), exec.getNode("6"), null);
         Assert.assertEquals(GenericStatus.ABORTED, status);
-    }
-
-    /** Helper, prints flow graph in some detail */
-    public void printNodes(FlowExecution exec, long startTime, boolean showTiming, boolean showActions) {
-        List<FlowNode> sorted = FlowNodeUtil.getIdSortedExecutionNodeList(exec);
-        System.out.println("Node dump follows, format:");
-        System.out.println("[ID]{parent,ids}(millisSinceStartOfRun) flowNodeClassName stepDisplayName [st=startId if a block node]");
-        System.out.println("Action format: ");
-        System.out.println("\t- actionClassName actionDisplayName");
-        System.out.println("------------------------------------------------------------------------------------------");
-        for (FlowNode node : sorted) {
-            StringBuilder formatted = new StringBuilder();
-            formatted.append('[').append(node.getId()).append(']');
-            formatted.append('{').append(StringUtils.join(node.getParentIds(), ',')).append('}');
-            if (showTiming) {
-                formatted.append('(');
-                if (node.getAction(TimingAction.class) != null) {
-                    formatted.append(TimingAction.getStartTime(node)-startTime);
-                } else {
-                    formatted.append("N/A");
-                }
-                formatted.append(')');
-            }
-            formatted.append(node.getClass().getSimpleName()).append(' ').append(node.getDisplayName());
-            if (node instanceof BlockEndNode) {
-                formatted.append("  [st=").append(((BlockEndNode)node).getStartNode().getId()).append(']');
-            }
-            if (showActions) {
-                for (Action a : node.getActions()) {
-                    if (!(a instanceof TimingAction)) {
-                        formatted.append("\n  -").append(a.getClass().getSimpleName()).append(' ').append(a.getDisplayName());
-                    }
-                }
-            }
-            System.out.println(formatted);
-        }
-        System.out.println("------------------------------------------------------------------------------------------");
     }
 }

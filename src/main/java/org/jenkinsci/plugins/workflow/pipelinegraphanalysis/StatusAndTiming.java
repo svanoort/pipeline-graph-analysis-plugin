@@ -24,7 +24,11 @@
 
 package org.jenkinsci.plugins.workflow.pipelinegraphanalysis;
 
+import com.google.common.base.Predicate;
+import com.google.common.base.Predicates;
+import hudson.model.Action;
 import hudson.model.Result;
+import org.apache.commons.lang.StringUtils;
 import org.jenkinsci.plugins.workflow.actions.ErrorAction;
 import org.jenkinsci.plugins.workflow.actions.NotExecutedNodeAction;
 import org.jenkinsci.plugins.workflow.actions.ThreadNameAction;
@@ -33,6 +37,7 @@ import org.jenkinsci.plugins.workflow.flow.FlowExecution;
 import org.jenkinsci.plugins.workflow.graph.BlockEndNode;
 import org.jenkinsci.plugins.workflow.graph.BlockStartNode;
 import org.jenkinsci.plugins.workflow.graph.FlowNode;
+import org.jenkinsci.plugins.workflow.graphanalysis.DepthFirstScanner;
 import org.jenkinsci.plugins.workflow.graphanalysis.MemoryFlowChunk;
 import org.jenkinsci.plugins.workflow.graphanalysis.ParallelMemoryFlowChunk;
 import org.jenkinsci.plugins.workflow.job.WorkflowRun;
@@ -44,18 +49,21 @@ import javax.annotation.Nonnull;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
 import org.jenkinsci.plugins.workflow.graph.FlowStartNode;
 import org.jenkinsci.plugins.workflow.graph.FlowEndNode;
+import org.kohsuke.accmod.Restricted;
+import org.kohsuke.accmod.restrictions.DoNotUse;
 
 /**
  * Provides common, comprehensive set of APIs for doing status and timing computations on pieces of a pipeline execution.
  *
- * <p/> <strong>Concepts:</strong> a chunk, which is a set of {@link FlowNode}s in the same {@link FlowExecution} with a first and last node.
- * <p/> Chunks exist in a context: the FlowNode before and the FlowNode after.  These follow common-sense rules:
+ * <p> <strong>Concepts:</strong> a chunk, which is a set of {@link FlowNode}s in the same {@link FlowExecution} with a first and last node. </p>
+ * <p> Chunks exist in a context: the FlowNode before and the FlowNode after.  These follow common-sense rules: </p>
  * <ol>
  *     <li>If a chunk has a null before node, then its first node must be the {@link FlowStartNode} for that execution</li>
  *     <li>If a chunk has a null after node, then its last node must be the {@link FlowEndNode} for that execution</li>
@@ -63,17 +71,17 @@ import org.jenkinsci.plugins.workflow.graph.FlowEndNode;
  *     <li>First nodes must always occur before last nodes</li>
  *     <li>Where a {@link WorkflowRun} is a parameter, it and the FlowNodes must all belong to the same execution</li>
  * </ol>
- * <p/> <strong>Parallel branch handling:</strong>
+ * <p> <strong>Parallel branch handling:</strong> </p>
  * <ol>
- *     <ul>Each branch is considered independent</ul>
- *     <ul>Branches may succeed, fail, or be in-progress/waiting for input.</ul>
+ *     <li>Each branch is considered independent</li>
+ *     <li>Branches may succeed, fail, or be in-progress/waiting for input.</li>
  * </ol>
  * @author Sam Van Oort
  */
 public class StatusAndTiming {
 
     /**
-     * Check that all the flownodes & run describe the same pipeline run/execution
+     * Check that all the flownodes &amp; run describe the same pipeline run/execution
      * @param run Run that nodes must belong to
      * @param nodes Nodes to match to run
      * @throws IllegalArgumentException For the first flownode that doesn't belong to the FlowExectuon of run
@@ -92,10 +100,14 @@ public class StatusAndTiming {
         }
     }
 
-    /** Return true if the run is paused on input */
+    /**
+     * Return true if the run is paused on input
+     * @param run
+     * @return
+     */
     public static boolean isPendingInput(WorkflowRun run) {
         // Logic borrowed from Pipeline Stage View plugin, RuneEx
-        InputAction inputAction = run.getAction(InputAction.class);
+        InputAction inputAction = run.getDirectAction(InputAction.class);
         if (inputAction != null) {
             List<InputStepExecution> executions = inputAction.getExecutions();
             if (executions != null && !executions.isEmpty()) {
@@ -105,7 +117,12 @@ public class StatusAndTiming {
         return false;
     }
 
-    /** Return status or null if not executed all (null FlowExecution) */
+    /**
+     * Return status or null if not executed all (null FlowExecution)
+     * @param run
+     * @param chunk
+     * @return Status or null if not executed all (null FlowExecution)
+     */
     @CheckForNull
     public static GenericStatus computeChunkStatus(@Nonnull WorkflowRun run, @Nonnull MemoryFlowChunk chunk) {
         FlowExecution exec = run.getExecution();
@@ -122,8 +139,8 @@ public class StatusAndTiming {
 
     /**
      * Compute the overall status for a chunk comprising firstNode through lastNode, inclusive
-     * <p/> All nodes must be in the same execution
-     * <p/> Note: for in-progress builds with parallel branches, if the branch is done, it has its own status.
+     * <p> All nodes must be in the same execution </p>
+     * <p> Note: for in-progress builds with parallel branches, if the branch is done, it has its own status. </p>
      * @param run Run that nodes belong to
      * @param before Node before the first node in this piece
      * @param firstNode First node of this piece
@@ -148,7 +165,7 @@ public class StatusAndTiming {
             if (run.isBuilding()) {
                 if (exec.getCurrentHeads().size() > 1 && lastNode instanceof BlockEndNode) {  // Check to see if all the action is on other branches
                     BlockStartNode start = ((BlockEndNode)lastNode).getStartNode();
-                    if (start.getAction(ThreadNameAction.class) != null) {
+                    if (start.getDirectAction(ThreadNameAction.class) != null) {
                         return (lastNode.getError() == null) ? GenericStatus.SUCCESS : GenericStatus.FAILURE;
                     }
                 }
@@ -181,16 +198,15 @@ public class StatusAndTiming {
 
     @CheckForNull
     public static TimingInfo computeChunkTiming(@Nonnull WorkflowRun run, long internalPauseDuration, @Nonnull MemoryFlowChunk chunk) {
-        return computeChunkTiming(run, internalPauseDuration, chunk.getNodeBefore(), chunk.getFirstNode(), chunk.getLastNode(), chunk.getNodeAfter());
+        return computeChunkTiming(run, internalPauseDuration, chunk.getFirstNode(), chunk.getLastNode(), chunk.getNodeAfter());
     }
 
     /**
      * Compute timing for a chunk of nodes
-     * <p/> Note: for in-progress builds with parallel branches, the running branches end at the current time.
-     *      Completed branches use the time at which the {@link BlockEndNode} terminating the branch was created.
+     * <p> Note: for in-progress builds with parallel branches, the running branches end at the current time.
+     *      Completed branches use the time at which the {@link BlockEndNode} terminating the branch was created. </p>
      * @param run WorkflowRun they all belong to
      * @param internalPauseDuration Millis paused in the chunk (including the ends)
-     * @param before Node before the chunk, if null assume this is the first piece of the flow and has nothing before
      * @param firstNode First node in the chunk
      * @param lastNode Last node in the chunk
      * @param after Node after the chunk, if null we assume this chunk is at the end of the flow
@@ -198,17 +214,16 @@ public class StatusAndTiming {
      */
     @CheckForNull
     public static TimingInfo computeChunkTiming(@Nonnull WorkflowRun run, long internalPauseDuration,
-                                        @CheckForNull FlowNode before, @Nonnull FlowNode firstNode,
+                                        @Nonnull FlowNode firstNode,
                                         @Nonnull FlowNode lastNode, @CheckForNull FlowNode after) {
         FlowExecution exec = run.getExecution();
         if (exec == null) {
             return null; // Haven't begun execution, or execution was hard-killed, timing is invalid
         }
         if (!NotExecutedNodeAction.isExecuted(lastNode)) {
-            return new TimingInfo(0,0);  // Nothing ran
+            return new TimingInfo(0,0,0);  // Nothing ran
         }
-        verifySameRun(run, before, firstNode, lastNode, after);
-        long startTime = TimingAction.getStartTime(firstNode);
+        verifySameRun(run, firstNode, lastNode, after);
         long endTime = (after != null) ? TimingAction.getStartTime(after) : System.currentTimeMillis();
 
         // Fudge
@@ -216,20 +231,18 @@ public class StatusAndTiming {
         if (isLastChunk && run.isBuilding()) {
             if (exec.getCurrentHeads().size() > 1 && lastNode instanceof BlockEndNode) {  // Check to see if all the action is on other branches
                 BlockStartNode start = ((BlockEndNode)lastNode).getStartNode();
-                if (start.getAction(ThreadNameAction.class) != null) {
+                if (start.getDirectAction(ThreadNameAction.class) != null) {
                     endTime = TimingAction.getStartTime(lastNode);  // Completed parallel branch, use the block end time
                 }
             }
         }
-
-        if (before == null) {
-            startTime = run.getStartTimeInMillis();
-        }
+        // What about null startTime???
+        long startTime = (firstNode instanceof FlowStartNode) ? run.getStartTimeInMillis() : TimingAction.getStartTime(firstNode);
         if (after == null && exec.isComplete()) {
             endTime = run.getDuration() + run.getStartTimeInMillis();
         }
 
-        return new TimingInfo((endTime-startTime), Math.min(Math.abs(internalPauseDuration), (endTime-startTime)));
+        return new TimingInfo((endTime-startTime), Math.min(Math.abs(internalPauseDuration), (endTime-startTime)), startTime);
     }
 
     /**
@@ -254,10 +267,11 @@ public class StatusAndTiming {
                 overallDuration = Math.max(overallDuration, t.getTotalDurationMillis());
             }
         }
+        long start = TimingAction.getStartTime(parallelStart);
         if (!isIncomplete) {
-            overallDuration = TimingAction.getStartTime(parallelEnd) - TimingAction.getStartTime(parallelStart);
+            overallDuration = TimingAction.getStartTime(parallelEnd) - start;
         }
-        return new TimingInfo(overallDuration, maxPause);
+        return new TimingInfo(overallDuration, maxPause, start);
     }
 
     /**
@@ -295,9 +309,9 @@ public class StatusAndTiming {
                         + start.getId()+','
                         + end.getId());
             }
-            ThreadNameAction branchName = start.getAction(ThreadNameAction.class);
+            ThreadNameAction branchName = start.getDirectAction(ThreadNameAction.class);
             assert branchName != null;
-            timings.put(branchName.getThreadName(), computeChunkTiming(run, pauseDurations[i], parallelStart, start, end, parallelEnd));
+            timings.put(branchName.getThreadName(), computeChunkTiming(run, pauseDurations[i], start, end, parallelEnd));
         }
         return timings;
     }
@@ -318,8 +332,8 @@ public class StatusAndTiming {
 
     /**
      * Compute status codes for a set of parallel branches.
-     * <p/>Note per {@link #computeChunkStatus(WorkflowRun, MemoryFlowChunk)} for in-progress builds with
-     *     parallel branches, if the branch is done, it has its own status.
+     * <p> Note per {@link #computeChunkStatus(WorkflowRun, MemoryFlowChunk)} for in-progress builds with
+     *     parallel branches, if the branch is done, it has its own status. </p>
      * @param run Run containing these nodes
      * @param branchStarts The nodes starting off each parallel branch (BlockStartNode)
      * @param branchEnds Last node in each parallel branch - might be the end of the branch, or might just be the latest step run
@@ -348,14 +362,16 @@ public class StatusAndTiming {
                         + start.getId()+','
                         + end.getId());
             }
-            ThreadNameAction branchName = start.getAction(ThreadNameAction.class);
+            ThreadNameAction branchName = start.getDirectAction(ThreadNameAction.class);
             assert branchName != null;
             statusMappings.put(branchName.getThreadName(), computeChunkStatus(run, parallelStart, start, end, parallelEnd));
         }
         return statusMappings;
     }
 
-    /** Combines the status results from a list of parallel branches to report a single overall status
+    /**
+     * Combines the status results from a list of parallel branches to report a single overall status
+     * @param statuses
      * @return Status, or null if none can be defined
      */
     @CheckForNull
@@ -364,5 +380,77 @@ public class StatusAndTiming {
             return null;
         }
         return Collections.max(statuses);
+    }
+
+
+    /**
+     * Helper, prints flow graph in some detail - now a common utility so others don't have to reinvent it
+     * @param run
+     * @param showTiming
+     * @param showActions
+     */
+    @Restricted(DoNotUse.class)
+    public static void printNodes(@Nonnull WorkflowRun run, boolean showTiming, boolean showActions) {
+        long runStartTime = run.getStartTimeInMillis();
+        FlowExecution exec = run.getExecution();
+        if (exec == null) {
+            return;
+        }
+        DepthFirstScanner scanner = new DepthFirstScanner();
+        List<FlowNode> sorted = scanner.filteredNodes(exec.getCurrentHeads(), (Predicate) Predicates.alwaysTrue());
+        Collections.sort(sorted, new Comparator<FlowNode>() {
+            @Override
+            public int compare(FlowNode node1, FlowNode node2) {
+                int node1Iota = parseIota(node1);
+                int node2Iota = parseIota(node2);
+
+                if (node1Iota < node2Iota) {
+                    return -1;
+                } else if (node1Iota > node2Iota) {
+                    return 1;
+                }
+                return 0;
+            }
+
+            private int parseIota(FlowNode node) {
+                try {
+                    return Integer.parseInt(node.getId());
+                } catch (NumberFormatException e) {
+                    return 0;
+                }
+            }
+        });
+        System.out.println("Node dump follows, format:");
+        System.out.println("[ID]{parent,ids}(millisSinceStartOfRun) flowNodeClassName stepDisplayName [st=startId if a block end node]");
+        System.out.println("Action format: ");
+        System.out.println("\t- actionClassName actionDisplayName");
+        System.out.println("------------------------------------------------------------------------------------------");
+        for (FlowNode node : sorted) {
+            StringBuilder formatted = new StringBuilder();
+            formatted.append('[').append(node.getId()).append(']');
+            formatted.append('{').append(StringUtils.join(node.getParentIds(), ',')).append('}');
+            if (showTiming) {
+                formatted.append('(');
+                if (node.getDirectAction(TimingAction.class) != null) {
+                    formatted.append(TimingAction.getStartTime(node)-runStartTime);
+                } else {
+                    formatted.append("N/A");
+                }
+                formatted.append(')');
+            }
+            formatted.append(node.getClass().getSimpleName()).append(' ').append(node.getDisplayName());
+            if (node instanceof BlockEndNode) {
+                formatted.append("  [st=").append(((BlockEndNode)node).getStartNode().getId()).append(']');
+            }
+            if (showActions) {
+                for (Action a : node.getActions()) {
+                    if (!(a instanceof TimingAction)) {
+                        formatted.append("\n  -").append(a.getClass().getSimpleName()).append(' ').append(a.getDisplayName());
+                    }
+                }
+            }
+            System.out.println(formatted);
+        }
+        System.out.println("------------------------------------------------------------------------------------------");
     }
 }
